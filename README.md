@@ -1,1 +1,15 @@
 # EasyBugfinder
+
+pkg update && pkg upgrade -y
+
+pkg install git golang
+
+pkg install iputils
+
+git clone https://github.com/tshackerz71/EasyBugfinder
+
+go build easybugfinder.go
+
+./easybugfinder
+
+go run easybugfinder.go
