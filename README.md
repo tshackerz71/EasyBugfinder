@@ -8,8 +8,6 @@ pkg install iputils
 
 git clone https://github.com/tshackerz71/EasyBugfinder
 
-go build easybugfinder.go
+cd EasyBugfinder
 
-./easybugfinder
-
-go run easybugfinder.go
+go run main.go
