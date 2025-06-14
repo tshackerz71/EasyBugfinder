@@ -3,196 +3,144 @@ package main
 import (
 	"bufio"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"net"
-	"net/http"
 	"net/netip"
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 	"time"
 )
 
-type ScanResult struct {
-	Host        string `json:"host"`
-	Port        string `json:"port"`
-	Ping        string `json:"ping"`
-	TCP         string `json:"tcp"`
-	TLS         string `json:"tls"`
-	HTTPGet     string `json:"http_get"`
-	CustomPorts []int  `json:"custom_ports"`
-}
-
-func showBanner() {
-	fmt.Println("\033[1;36m")
-	fmt.Println("███████╗ █████╗ ███████╗██╗   ██╗     ██████╗ ██╗   ██╗ ██████╗ ███████╗██████╗ ")
-	fmt.Println("██╔════╝██╔══██╗██╔════╝██║   ██║    ██╔═══██╗██║   ██║██╔═══██╗██╔════╝██╔══██╗")
-	fmt.Println("█████╗  ███████║███████╗██║   ██║    ██║   ██║██║   ██║██║   ██║█████╗  ██████╔╝")
-	fmt.Println("██╔══╝  ██╔══██║╚════██║██║   ██║    ██║▄▄ ██║██║   ██║██║   ██║██╔══╝  ██╔══██╗")
-	fmt.Println("██║     ██║  ██║███████║╚██████╔╝    ╚██████╔╝╚██████╔╝╚██████╔╝███████╗██║  ██║")
-	fmt.Println("╚═╝     ╚═╝  ╚═╝╚══════╝ ╚═════╝      ╚══▀▀═╝  ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝")
-	fmt.Println("Made with ❤️ by TS Hacker")
-	fmt.Println("\033[0m")
-	fmt.Println()
-}
-
-func pingHost(host string) string {
-	cmd := exec.Command("ping", "-c", "1", "-W", "1", host)
-	if err := cmd.Run(); err != nil {
-		return "FAIL"
+func pingHost(host string) bool {
+	cmd := exec.Command("ping", "-c", "1", "-W", "1", host) // For Linux/Mac
+	err := cmd.Run()
+	if err != nil {
+		fmt.Println("[PING] FAIL:", err)
+		return false
 	}
-	return "OK"
+	fmt.Println("[PING] OK")
+	return true
 }
 
-func tcpConnect(host, port string) string {
+func tcpConnect(host string, port string) bool {
 	address := net.JoinHostPort(host, port)
 	conn, err := net.DialTimeout("tcp", address, 3*time.Second)
 	if err != nil {
-		return "FAIL"
+		fmt.Println("[TCP] FAIL:", err)
+		return false
 	}
+	fmt.Println("[TCP] OK")
 	conn.Close()
-	return "OK"
+	return true
 }
 
-func tlsHandshake(host, port string) string {
+func tlsHandshake(host string, port string) bool {
 	address := net.JoinHostPort(host, port)
-	conf := &tls.Config{ServerName: host, InsecureSkipVerify: true}
+	conf := &tls.Config{
+		ServerName:         host,
+		InsecureSkipVerify: true,
+	}
 	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", address, conf)
 	if err != nil {
-		return "FAIL"
+		fmt.Println("[TLS] FAIL:", err)
+		return false
 	}
+	fmt.Println("[TLS] OK")
 	conn.Close()
-	return "OK"
+	return true
 }
 
-func httpGetTest(host string) string {
-	url := "https://" + host
-	client := http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(url)
+func scanHost(host string, port string) {
+	fmt.Println("\nTesting host:", host)
+
+	pingOK := pingHost(host)
+	tcpOK := tcpConnect(host, port)
+	tlsOK := false
+	if tcpOK {
+		tlsOK = tlsHandshake(host, port)
+	}
+
+	fmt.Println("SUMMARY for", host)
+	if pingOK {
+		fmt.Println("PING: OK")
+	} else {
+		fmt.Println("PING: FAIL")
+	}
+	if tcpOK {
+		fmt.Println("TCP CONNECT:", port, "OK")
+	} else {
+		fmt.Println("TCP CONNECT:", port, "FAIL")
+	}
+	if tlsOK {
+		fmt.Println("TLS HANDSHAKE: OK → ✅ Can test in tunnel app")
+	} else {
+		fmt.Println("TLS HANDSHAKE: FAIL")
+	}
+}
+
+func bulkScan(domains []string, port string) {
+	for _, d := range domains {
+		scanHost(strings.TrimSpace(d), port)
+	}
+}
+
+func cidrScan(cidr string, port string) {
+	prefix, err := netip.ParsePrefix(cidr)
 	if err != nil {
-		return "FAIL"
+		fmt.Println("Invalid CIDR:", err)
+		return
 	}
-	resp.Body.Close()
-	return "OK"
-}
-
-func scanHost(host, port string, customPorts []int, fullScan bool, wg *sync.WaitGroup, mu *sync.Mutex, output *[]ScanResult, progress chan<- int) {
-	defer wg.Done()
-	res := ScanResult{Host: host, Port: port}
-	if fullScan {
-		res.Ping = pingHost(host)
-		res.TCP = tcpConnect(host, port)
-		if res.TCP == "OK" {
-			res.TLS = tlsHandshake(host, port)
-		}
-		res.HTTPGet = httpGetTest(host)
-		for _, cp := range customPorts {
-			if tcpConnect(host, fmt.Sprint(cp)) == "OK" {
-				res.CustomPorts = append(res.CustomPorts, cp)
-			}
-		}
-	}
-	mu.Lock()
-	*output = append(*output, res)
-	mu.Unlock()
-	progress <- 1
-}
-
-func saveResultsJSON(results []ScanResult) {
-	f, _ := os.Create("scan_results.json")
-	defer f.Close()
-	json.NewEncoder(f).Encode(results)
-	fmt.Println("Results saved to scan_results.json")
-}
-
-func showProgress(total int, progress <-chan int) {
-	count := 0
-	for range progress {
-		count++
-		fmt.Printf("Progress: %d/%d completed\r", count, total)
-		if count == total {
-			fmt.Println("\nAll scans done.")
-			return
-		}
+	for ip := prefix.Addr(); prefix.Contains(ip); ip = ip.Next() {
+		scanHost(ip.String(), port)
 	}
 }
 
 func main() {
-	showBanner()
-	for {
-		fmt.Println("1. Single domain scan 2. Bulk 3. CIDR 4. Exit")
-		var mode int
-		fmt.Scanln(&mode)
-		if mode == 4 {
-			fmt.Println("Goodbye!")
-			return
-		}
-		fmt.Println("Full scan (1) or selective (2)?")
-		var scanType int
-		fmt.Scanln(&scanType)
-		fullScan := scanType == 1
-		fmt.Println("Enter custom ports (comma, optional):")
-		var cps string
-		fmt.Scanln(&cps)
-		var customPorts []int
-		for _, p := range strings.Split(cps, ",") {
-			if p != "" {
-				var pi int
-				fmt.Sscan(p, &pi)
-				customPorts = append(customPorts, pi)
+	fmt.Println("🌟 EASY BUGFINDER 🌟")
+	fmt.Println("Select mode:")
+	fmt.Println("1. Single domain scan")
+	fmt.Println("2. Bulk domain scan")
+	fmt.Println("3. CIDR range scan")
+	fmt.Print("Choice: ")
+
+	var choice int
+	fmt.Scanln(&choice)
+
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Print("Enter port (default 443): ")
+	portInput, _ := reader.ReadString('\n')
+	port := strings.TrimSpace(portInput)
+	if port == "" {
+		port = "443"
+	}
+
+	switch choice {
+	case 1:
+		fmt.Print("Enter domain: ")
+		host, _ := reader.ReadString('\n')
+		scanHost(strings.TrimSpace(host), port)
+	case 2:
+		fmt.Println("Enter domains (comma-separated OR multiple lines). End with empty line:")
+		var domains []string
+		for {
+			line, _ := reader.ReadString('\n')
+			line = strings.TrimSpace(line)
+			if line == "" {
+				break
+			}
+			if strings.Contains(line, ",") {
+				domains = append(domains, strings.Split(line, ",")...)
+			} else {
+				domains = append(domains, line)
 			}
 		}
-		var targets []string
-		if mode == 1 {
-			fmt.Println("Enter domain:")
-			var d string
-			fmt.Scanln(&d)
-			targets = append(targets, d)
-		} else if mode == 2 {
-			fmt.Println("paste/comma/file?")
-			var m string
-			fmt.Scanln(&m)
-			if m == "paste" {
-				s := bufio.NewScanner(os.Stdin)
-				for s.Scan() {
-					l := s.Text()
-					if l == "" { break }
-					targets = append(targets, l)
-				}
-			} else if m == "comma" {
-				var l string
-				fmt.Scanln(&l)
-				targets = strings.Split(l, ",")
-			} else if m == "file" {
-				var path string
-				fmt.Scanln(&path)
-				f, _ := os.Open(path)
-				s := bufio.NewScanner(f)
-				for s.Scan() { targets = append(targets, s.Text()) }
-				f.Close()
-			}
-		} else if mode == 3 {
-			fmt.Println("Enter CIDR:")
-			var cidr string
-			fmt.Scanln(&cidr)
-			p, _ := netip.ParsePrefix(cidr)
-			for ip := p.Masked().Addr(); p.Contains(ip); ip = ip.Next() {
-				targets = append(targets, ip.String())
-			}
-		}
-		var wg sync.WaitGroup
-		var mu sync.Mutex
-		var out []ScanResult
-		progress := make(chan int)
-		go showProgress(len(targets), progress)
-		for _, t := range targets {
-			wg.Add(1)
-			go scanHost(strings.TrimSpace(t), "443", customPorts, fullScan, &wg, &mu, &out, progress)
-		}
-		wg.Wait()
-		close(progress)
-		saveResultsJSON(out)
+		bulkScan(domains, port)
+	case 3:
+		fmt.Print("Enter CIDR (e.g. 192.168.1.0/30): ")
+		cidr, _ := reader.ReadString('\n')
+		cidrScan(strings.TrimSpace(cidr), port)
+	default:
+		fmt.Println("Invalid choice.")
 	}
 }
