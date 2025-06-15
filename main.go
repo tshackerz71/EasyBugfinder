@@ -5,15 +5,17 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
 func pingHost(host string) bool {
-	cmd := exec.Command("ping", "-c", "1", "-W", "1", host) // For Linux/Mac
+	cmd := exec.Command("ping", "-c", "1", "-W", "1", host)
 	err := cmd.Run()
 	if err != nil {
 		fmt.Println("[PING] FAIL:", err)
@@ -51,38 +53,69 @@ func tlsHandshake(host string, port string) bool {
 	return true
 }
 
-func scanHost(host string, port string) {
-	fmt.Println("\nTesting host:", host)
+func httpTest(host string) bool {
+	url := "https://" + host + "/"
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		fmt.Println("[HTTP] FAIL: Bad request:", err)
+		return false
+	}
+	req.Header.Set("Host", host)
+	req.Header.Set("X-Forwarded-For", "1.1.1.1")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (EasyBugFinder)")
 
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Println("[HTTP] FAIL:", err)
+		return false
+	}
+	defer resp.Body.Close()
+	fmt.Println("[HTTP] OK - Status:", resp.Status)
+	return true
+}
+
+func scanHost(host string, port string, wg *sync.WaitGroup, progress chan<- struct{}) {
+	defer wg.Done()
+	fmt.Println("\n🚀 Testing host:", host)
 	pingOK := pingHost(host)
 	tcpOK := tcpConnect(host, port)
 	tlsOK := false
+	httpOK := false
 	if tcpOK {
 		tlsOK = tlsHandshake(host, port)
+		if tlsOK {
+			httpOK = httpTest(host)
+		}
 	}
+	fmt.Println("📝 SUMMARY for", host)
+	fmt.Printf("PING: %v | TCP: %v | TLS: %v | HTTP: %v\n",
+		boolToStatus(pingOK), boolToStatus(tcpOK), boolToStatus(tlsOK), boolToStatus(httpOK))
+	progress <- struct{}{}
+}
 
-	fmt.Println("SUMMARY for", host)
-	if pingOK {
-		fmt.Println("PING: OK")
-	} else {
-		fmt.Println("PING: FAIL")
+func boolToStatus(b bool) string {
+	if b {
+		return "OK"
 	}
-	if tcpOK {
-		fmt.Println("TCP CONNECT:", port, "OK")
-	} else {
-		fmt.Println("TCP CONNECT:", port, "FAIL")
-	}
-	if tlsOK {
-		fmt.Println("TLS HANDSHAKE: OK → ✅ Can test in tunnel app")
-	} else {
-		fmt.Println("TLS HANDSHAKE: FAIL")
-	}
+	return "FAIL"
 }
 
 func bulkScan(domains []string, port string) {
+	var wg sync.WaitGroup
+	progress := make(chan struct{}, len(domains))
 	for _, d := range domains {
-		scanHost(strings.TrimSpace(d), port)
+		d = strings.TrimSpace(d)
+		if d == "" {
+			continue
+		}
+		wg.Add(1)
+		go scanHost(d, port, &wg, progress)
 	}
+	go showProgress(len(domains), progress)
+	wg.Wait()
 }
 
 func cidrScan(cidr string, port string) {
@@ -91,22 +124,37 @@ func cidrScan(cidr string, port string) {
 		fmt.Println("Invalid CIDR:", err)
 		return
 	}
+	var wg sync.WaitGroup
+	var count int
+	progress := make(chan struct{}, 1024)
 	for ip := prefix.Addr(); prefix.Contains(ip); ip = ip.Next() {
-		scanHost(ip.String(), port)
+		count++
+		ipStr := ip.String()
+		wg.Add(1)
+		go scanHost(ipStr, port, &wg, progress)
 	}
+	go showProgress(count, progress)
+	wg.Wait()
+}
+
+func showProgress(total int, progress <-chan struct{}) {
+	completed := 0
+	for range progress {
+		completed++
+		fmt.Printf("\rProgress: %d/%d", completed, total)
+	}
+	fmt.Println("\n✅ All scans complete!")
 }
 
 func main() {
-	fmt.Println("🌟 EASY BUGFINDER 🌟")
+	fmt.Println("🌟 EASY BUGFINDER 🌟 (Made with TS Hacker)")
 	fmt.Println("Select mode:")
-	fmt.Println("1. Single domain scan")
-	fmt.Println("2. Bulk domain scan")
-	fmt.Println("3. CIDR range scan")
+	fmt.Println("1️⃣ Single domain scan")
+	fmt.Println("2️⃣ Bulk domain scan")
+	fmt.Println("3️⃣ CIDR range scan")
 	fmt.Print("Choice: ")
-
 	var choice int
 	fmt.Scanln(&choice)
-
 	reader := bufio.NewReader(os.Stdin)
 	fmt.Print("Enter port (default 443): ")
 	portInput, _ := reader.ReadString('\n')
@@ -114,14 +162,18 @@ func main() {
 	if port == "" {
 		port = "443"
 	}
-
 	switch choice {
 	case 1:
 		fmt.Print("Enter domain: ")
 		host, _ := reader.ReadString('\n')
-		scanHost(strings.TrimSpace(host), port)
+		var wg sync.WaitGroup
+		progress := make(chan struct{}, 1)
+		wg.Add(1)
+		go scanHost(strings.TrimSpace(host), port, &wg, progress)
+		go showProgress(1, progress)
+		wg.Wait()
 	case 2:
-		fmt.Println("Enter domains (comma-separated OR multiple lines). End with empty line:")
+		fmt.Println("Enter domains (comma-separated or multiple lines). End with empty line:")
 		var domains []string
 		for {
 			line, _ := reader.ReadString('\n')
